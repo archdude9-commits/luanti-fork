@@ -5,7 +5,7 @@ on:
 
 jobs:
   # ========================================================
-  # LINUX 64-BIT BUILD
+  # LINUX 64-BIT BUILD (bereits erfolgreich)
   # ========================================================
   build-linux-64:
     runs-on: ubuntu-latest
@@ -46,13 +46,13 @@ jobs:
           fps_max = 144
           EOF
 
-      - name: Compile Linux 64-Bit (-O3 & Fast-Math)
+      - name: Compile Linux 64-Bit (-O3)
         run: |
           mkdir build && cd build
           cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="-O3 -march=x86-64-v2 -ffast-math" \
-            -DCMAKE_C_FLAGS="-O3 -march=x86-64-v2 -ffast-math" \
+            -DCMAKE_CXX_FLAGS="-O3 -march=x86-64-v2" \
+            -DCMAKE_C_FLAGS="-O3 -march=x86-64-v2" \
             -DBUILD_UNITTESTS=FALSE \
             -DBUILD_DOCUMENTATION=FALSE \
             -DRUN_IN_PLACE=TRUE
@@ -70,7 +70,7 @@ jobs:
           path: dist/
 
   # ========================================================
-  # WINDOWS 64-BIT BUILD
+  # WINDOWS 64-BIT BUILD (Modernes CLANG64 LLVM)
   # ========================================================
   build-windows-64:
     runs-on: windows-latest
@@ -80,30 +80,30 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup MSYS2 MINGW64 Environment
+      - name: Setup MSYS2 CLANG64 Environment
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: CLANG64
           install: >-
             git
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-zlib
-            mingw-w64-x86_64-libzip
-            mingw-w64-x86_64-zstd
-            mingw-w64-x86_64-SDL2
-            mingw-w64-x86_64-luajit
-            mingw-w64-x86_64-sqlite3
-            mingw-w64-x86_64-openal
-            mingw-w64-x86_64-libvorbis
-            mingw-w64-x86_64-libogg
-            mingw-w64-x86_64-libjpeg-turbo
-            mingw-w64-x86_64-libpng
-            mingw-w64-x86_64-curl
-            mingw-w64-x86_64-freetype
-            mingw-w64-x86_64-gmp
-            mingw-w64-x86_64-gettext
+            mingw-w64-clang-x86_64-toolchain
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-zlib
+            mingw-w64-clang-x86_64-libzip
+            mingw-w64-clang-x86_64-zstd
+            mingw-w64-clang-x86_64-SDL2
+            mingw-w64-clang-x86_64-luajit
+            mingw-w64-clang-x86_64-sqlite3
+            mingw-w64-clang-x86_64-openal
+            mingw-w64-clang-x86_64-libvorbis
+            mingw-w64-clang-x86_64-libogg
+            mingw-w64-clang-x86_64-libjpeg-turbo
+            mingw-w64-clang-x86_64-libpng
+            mingw-w64-clang-x86_64-curl
+            mingw-w64-clang-x86_64-freetype
+            mingw-w64-clang-x86_64-gmp
+            mingw-w64-clang-x86_64-gettext
 
       - name: Ensure IrrlichtMt Source Exists
         shell: bash
@@ -129,14 +129,16 @@ jobs:
           fps_max = 144
           EOF
 
-      - name: Compile Windows 64-Bit (-O3)
+      - name: Compile Windows 64-Bit mit Clang (-O3)
         shell: msys2 {0}
         run: |
           mkdir build && cd build
           cmake .. -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="-O3 -ffast-math" \
-            -DCMAKE_C_FLAGS="-O3 -ffast-math" \
+            -DCMAKE_CXX_FLAGS="-O3" \
+            -DCMAKE_C_FLAGS="-O3" \
             -DBUILD_UNITTESTS=FALSE \
             -DBUILD_DOCUMENTATION=FALSE \
             -DRUN_IN_PLACE=TRUE
@@ -149,8 +151,8 @@ jobs:
           cp -r bin/* dist/bin/
           cp -r builtin/* dist/builtin/
           cp minetest.conf dist/
-          # Kopiert alle relevanten DLLs für einen voll portablen Start
-          cp /mingw64/bin/*.dll dist/bin/ 2>/dev/null || true
+          # Kopiert die Clang-Laufzeit-DLLs portabel in den bin-Ordner
+          cp /clang64/bin/*.dll dist/bin/ 2>/dev/null || true
 
       - name: Upload Windows 64-Bit ZIP
         uses: actions/upload-artifact@v4
