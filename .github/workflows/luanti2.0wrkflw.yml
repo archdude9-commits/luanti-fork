@@ -15,11 +15,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install All Linux Dependencies (inkl. SDL2 & Zlib)
+      - name: Install All Linux Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build git \
-            libsdl2-dev zlib1g-dev libzstd-dev libluajit-5.1-dev libsqlite3-dev \
+          sudo apt-get install -y build-essential cmake ninja-build git gettext \
+            libsdl2-dev zlib1g-dev libzip-dev libzstd-dev libluajit-5.1-dev libsqlite3-dev \
             libopenal-dev libvorbis-dev libogg-dev libjpeg-dev libpng-dev \
             libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxi-dev \
             libxxf86vm-dev libcurl4-openssl-dev libfreetype-dev libgmp-dev
@@ -52,6 +52,9 @@ jobs:
           cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_FLAGS="-O3 -march=x86-64-v2 -ffast-math" \
+            -DCMAKE_C_FLAGS="-O3 -march=x86-64-v2 -ffast-math" \
+            -DBUILD_UNITTESTS=FALSE \
+            -DBUILD_DOCUMENTATION=FALSE \
             -DRUN_IN_PLACE=TRUE
           ninja
           cd ..
@@ -68,4 +71,89 @@ jobs:
 
   # ========================================================
   # WINDOWS 64-BIT BUILD
-  # =====================================
+  # ========================================================
+  build-windows-64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Luanti Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2 MINGW64 Environment
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            git
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-libzip
+            mingw-w64-x86_64-zstd
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-luajit
+            mingw-w64-x86_64-sqlite3
+            mingw-w64-x86_64-openal
+            mingw-w64-x86_64-libvorbis
+            mingw-w64-x86_64-libogg
+            mingw-w64-x86_64-libjpeg-turbo
+            mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-freetype
+            mingw-w64-x86_64-gmp
+            mingw-w64-x86_64-gettext
+
+      - name: Ensure IrrlichtMt Source Exists
+        shell: bash
+        run: |
+          if [ ! -d "irr" ] && [ ! -d "lib/irrlichtmt" ]; then
+            git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
+          fi
+
+      - name: Add Distant Horizons & Sodium Config
+        shell: bash
+        run: |
+          cat << 'EOF' > minetest.conf
+          viewing_range = 5000
+          max_block_send_distance = 64
+          max_block_generate_distance = 64
+          client_mesh_generation_threads = 8
+          mesh_generation_interval = 0
+          enable_shaders = false
+          enable_dynamic_shadows = false
+          leaves_style = opaque
+          smooth_lighting = false
+          occlusion_culler = cull_cells
+          fps_max = 144
+          EOF
+
+      - name: Compile Windows 64-Bit (-O3)
+        shell: msys2 {0}
+        run: |
+          mkdir build && cd build
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-O3 -ffast-math" \
+            -DCMAKE_C_FLAGS="-O3 -ffast-math" \
+            -DBUILD_UNITTESTS=FALSE \
+            -DBUILD_DOCUMENTATION=FALSE \
+            -DRUN_IN_PLACE=TRUE
+          ninja
+
+      - name: Package Portable Windows 64-Bit ZIP
+        shell: bash
+        run: |
+          mkdir -p dist/bin dist/builtin
+          cp -r bin/* dist/bin/
+          cp -r builtin/* dist/builtin/
+          cp minetest.conf dist/
+          # Kopiert alle relevanten DLLs für einen voll portablen Start
+          cp /mingw64/bin/*.dll dist/bin/ 2>/dev/null || true
+
+      - name: Upload Windows 64-Bit ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Luanti-Ultra-Windows-64bit
+          path: dist/
