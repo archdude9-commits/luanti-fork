@@ -1,15 +1,79 @@
 name: Build All 4 ZIPs (Ultra Optimized)
 
 on:
-  workflow_dispatch: # Ermöglicht manuellen Start per Klick
+  workflow_dispatch:
 
 jobs:
+  # ========================================================
+  # LINUX 64-BIT BUILD
+  # ========================================================
+  build-linux-64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Luanti Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Real Linux Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build git \
+            libluajit-5.1-dev libzstd-dev libsqlite3-dev libopenal-dev \
+            libvorbis-dev libogg-dev libjpeg-dev libpng-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxi-dev \
+            libxxf86vm-dev libcurl4-openssl-dev libfreetype6-dev
+
+      - name: Ensure IrrlichtMt Source Exists
+        run: |
+          if [ ! -d "irr" ] && [ ! -d "lib/irrlichtmt" ]; then
+            echo "Cloning IrrlichtMt into lib/irrlichtmt..."
+            git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
+          fi
+
+      - name: Add Ultra-Optimized minetest.conf
+        run: |
+          cat << 'EOF' > minetest.conf
+          viewing_range = 5000
+          max_block_send_distance = 64
+          max_block_generate_distance = 64
+          client_mesh_generation_threads = 8
+          mesh_generation_interval = 0
+          enable_shaders = false
+          enable_dynamic_shadows = false
+          leaves_style = opaque
+          smooth_lighting = false
+          occlusion_culler = cull_cells
+          fps_max = 144
+          EOF
+
+      - name: Build Optimized Linux 64
+        run: |
+          mkdir build && cd build
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-O3 -flto -march=x86-64-v2 -ffast-math" \
+            -DRUN_IN_PLACE=TRUE
+          ninja
+          cd ..
+          mkdir -p dist
+          cp -r bin dist/
+          cp -r builtin dist/
+          cp minetest.conf dist/
+
+      - name: Upload Linux 64-Bit ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Luanti-Ultra-Linux-64bit
+          path: dist/
+
   # ========================================================
   # WINDOWS BUILDS (64-BIT & 32-BIT)
   # ========================================================
   build-windows:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: x86_64
@@ -23,6 +87,8 @@ jobs:
     steps:
       - name: Checkout Luanti Code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Setup MSYS2 (${{ matrix.arch }})
         uses: msys2/setup-msys2@v2
@@ -38,11 +104,22 @@ jobs:
             ${{ matrix.prefix }}-sqlite3
             ${{ matrix.prefix }}-openal
             ${{ matrix.prefix }}-libvorbis
+            ${{ matrix.prefix }}-libogg
+            ${{ matrix.prefix }}-libjpeg-turbo
+            ${{ matrix.prefix }}-libpng
+            ${{ matrix.prefix }}-curl
+            ${{ matrix.prefix }}-freetype
 
-      - name: Apply Distant Horizons & Sodium Optimization Patch
+      - name: Ensure IrrlichtMt Source Exists
         shell: bash
         run: |
-          # Optimierte minetest.conf direkt beilegen
+          if [ ! -d "irr" ] && [ ! -d "lib/irrlichtmt" ]; then
+            git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
+          fi
+
+      - name: Add Ultra-Optimized minetest.conf
+        shell: bash
+        run: |
           cat << 'EOF' > minetest.conf
           viewing_range = 5000
           max_block_send_distance = 64
@@ -57,26 +134,24 @@ jobs:
           fps_max = 144
           EOF
 
-      - name: Build with Ultra Flags (-O3)
+      - name: Build Windows (${{ matrix.arch }})
         shell: msys2 {0}
         run: |
           mkdir build && cd build
           cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="-O3 -ffast-math" \
-            -DCMAKE_C_FLAGS="-O3 -ffast-math" \
+            -DCMAKE_CXX_FLAGS="-O3 -flto -ffast-math" \
             -DRUN_IN_PLACE=TRUE
           ninja
 
-      - name: Prepare Windows Package
+      - name: Package Windows ZIP with DLLs
         shell: bash
         run: |
           mkdir -p dist/
           cp -r bin dist/
           cp -r builtin dist/
-          cp -r games dist/ 2>/dev/null || true
           cp minetest.conf dist/
-          # Kopiere benötigte DLLs
+          # Kopiert alle benötigten Laufzeit-DLLs direkt zur EXE, damit sie portabel läuft
           cp /${{ matrix.msystem }}/bin/*.dll dist/bin/ 2>/dev/null || true
 
       - name: Upload Windows ZIP
@@ -86,66 +161,41 @@ jobs:
           path: dist/
 
   # ========================================================
-  # LINUX 64-BIT BUILD
-  # ========================================================
-  build-linux-64:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build \
-            libirrlichtmt-dev libluajit-5.1-dev libzstd-dev libsqlite3-dev \
-            libopenal-dev libvorbis-dev
-
-      - name: Build Linux 64-Bit Optimized
-        run: |
-          mkdir build && cd build
-          cmake .. -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="-O3 -flto -march=x86-64-v2 -ffast-math" \
-            -DRUN_IN_PLACE=TRUE
-          ninja
-          cd ..
-          mkdir -p dist
-          cp -r bin dist/
-          cp -r builtin dist/
-
-      - name: Upload Linux 64-Bit ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: Luanti-Ultra-Linux-64bit
-          path: dist/
-
-  # ========================================================
-  # LINUX 32-BIT BUILD (via i386 Docker Container)
+  # LINUX 32-BIT BUILD
   # ========================================================
   build-linux-32:
-    runs-on: ubuntu-latest
-    container:
-      image: i386/ubuntu:22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Install 32-Bit Toolchain
+      - name: Enable Multiarch & Install 32-bit Toolchain
         run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential cmake ninja-build git \
-            libirrlichtmt-dev libluajit-5.1-dev libzstd-dev libsqlite3-dev \
-            libopenal-dev libvorbis-dev
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build git \
+            g++-multilib gcc-multilib \
+            libluajit-5.1-dev:i386 libzstd-dev:i386 libsqlite3-dev:i386 \
+            libopenal-dev:i386 libvorbis-dev:i386 libogg-dev:i386 \
+            libjpeg-dev:i386 libpng-dev:i386 libgl1-mesa-dev:i386 \
+            libx11-dev:i386 libxi-dev:i386 libxxf86vm-dev:i386 \
+            libcurl4-openssl-dev:i386 libfreetype6-dev:i386
 
-      - name: Build Linux 32-Bit Optimized
+      - name: Ensure IrrlichtMt Source Exists
+        run: |
+          if [ ! -d "irr" ] && [ ! -d "lib/irrlichtmt" ]; then
+            git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
+          fi
+
+      - name: Build Linux 32-Bit
         run: |
           mkdir build && cd build
-          cmake .. -G Ninja \
+          PKG_CONFIG_PATH="/usr/lib/i386-linux-gnu/pkgconfig" cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="-O3 -m32 -march=i686 -ffast-math" \
-            -DCMAKE_C_FLAGS="-O3 -m32 -march=i686 -ffast-math" \
+            -DCMAKE_CXX_FLAGS="-m32 -O3 -march=i686 -ffast-math" \
+            -DCMAKE_C_FLAGS="-m32 -O3 -march=i686 -ffast-math" \
             -DRUN_IN_PLACE=TRUE
           ninja
           cd ..
