@@ -1,0 +1,71 @@
+name: Build Ultra Luanti (Win64 & Linux64)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # ========================================================
+  # LINUX 64-BIT BUILD
+  # ========================================================
+  build-linux-64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Luanti Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install All Linux Dependencies (inkl. SDL2 & Zlib)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build git \
+            libsdl2-dev zlib1g-dev libzstd-dev libluajit-5.1-dev libsqlite3-dev \
+            libopenal-dev libvorbis-dev libogg-dev libjpeg-dev libpng-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxi-dev \
+            libxxf86vm-dev libcurl4-openssl-dev libfreetype-dev libgmp-dev
+
+      - name: Ensure IrrlichtMt Source Exists
+        run: |
+          if [ ! -d "irr" ] && [ ! -d "lib/irrlichtmt" ]; then
+            git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
+          fi
+
+      - name: Add Distant Horizons & Sodium Config
+        run: |
+          cat << 'EOF' > minetest.conf
+          viewing_range = 5000
+          max_block_send_distance = 64
+          max_block_generate_distance = 64
+          client_mesh_generation_threads = 8
+          mesh_generation_interval = 0
+          enable_shaders = false
+          enable_dynamic_shadows = false
+          leaves_style = opaque
+          smooth_lighting = false
+          occlusion_culler = cull_cells
+          fps_max = 144
+          EOF
+
+      - name: Compile Linux 64-Bit (-O3 & Fast-Math)
+        run: |
+          mkdir build && cd build
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-O3 -march=x86-64-v2 -ffast-math" \
+            -DRUN_IN_PLACE=TRUE
+          ninja
+          cd ..
+          mkdir -p dist/bin dist/builtin
+          cp -r bin/* dist/bin/
+          cp -r builtin/* dist/builtin/
+          cp minetest.conf dist/
+
+      - name: Upload Linux 64-Bit ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Luanti-Ultra-Linux-64bit
+          path: dist/
+
+  # ========================================================
+  # WINDOWS 64-BIT BUILD
+  # =====================================
