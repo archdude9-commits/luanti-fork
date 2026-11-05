@@ -33,7 +33,6 @@ jobs:
             ninja
             cmake
             ${{ matrix.prefix }}-toolchain
-            ${{ matrix.prefix }}-libirrlichtmt
             ${{ matrix.prefix }}-zstd
             ${{ matrix.prefix }}-luajit
             ${{ matrix.prefix }}-sqlite3
@@ -58,14 +57,14 @@ jobs:
           fps_max = 144
           EOF
 
-      - name: Build with Ultra Flags (-O3, LTO)
+      - name: Build with Ultra Flags (-O3)
         shell: msys2 {0}
         run: |
           mkdir build && cd build
           cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="-O3 -flto -ffast-math" \
-            -DCMAKE_C_FLAGS="-O3 -flto -ffast-math" \
+            -DCMAKE_CXX_FLAGS="-O3 -ffast-math" \
+            -DCMAKE_C_FLAGS="-O3 -ffast-math" \
             -DRUN_IN_PLACE=TRUE
           ninja
 
