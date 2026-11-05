@@ -8,14 +8,14 @@ jobs:
   # LINUX 64-BIT BUILD
   # ========================================================
   build-linux-64:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout Luanti Code
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install Real Linux Dependencies
+      - name: Install Linux 64 Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build git \
@@ -27,7 +27,6 @@ jobs:
       - name: Ensure IrrlichtMt Source Exists
         run: |
           if [ ! -d "irr" ] && [ ! -d "lib/irrlichtmt" ]; then
-            echo "Cloning IrrlichtMt into lib/irrlichtmt..."
             git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
           fi
 
@@ -47,7 +46,7 @@ jobs:
           fps_max = 144
           EOF
 
-      - name: Build Optimized Linux 64
+      - name: Build Linux 64-Bit Optimized
         run: |
           mkdir build && cd build
           cmake .. -G Ninja \
@@ -65,6 +64,53 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Luanti-Ultra-Linux-64bit
+          path: dist/
+
+  # ========================================================
+  # LINUX 32-BIT BUILD (über nativen 32-Bit Debian Docker)
+  # ========================================================
+  build-linux-32:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build inside native 32-bit Container
+        run: |
+          docker run --rm --platform linux/386 -v $(pwd):/workspace -w /workspace i386/debian:bookworm-slim bash -c "
+            set -e
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              build-essential cmake ninja-build git \
+              libluajit-5.1-dev libzstd-dev libsqlite3-dev libopenal-dev \
+              libvorbis-dev libogg-dev libjpeg-dev libpng-dev \
+              libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxi-dev \
+              libxxf86vm-dev libcurl4-openssl-dev libfreetype-dev
+            
+            if [ ! -d 'irr' ] && [ ! -d 'lib/irrlichtmt' ]; then
+              git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
+            fi
+
+            mkdir -p build && cd build
+            cmake .. -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CXX_FLAGS='-O3 -march=i686 -ffast-math' \
+              -DRUN_IN_PLACE=TRUE
+            ninja
+            cd ..
+
+            mkdir -p dist/bin dist/builtin
+            cp -r bin/* dist/bin/
+            cp -r builtin/* dist/builtin/
+            chmod -R 777 dist
+          "
+
+      - name: Upload Linux 32-Bit ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Luanti-Ultra-Linux-32bit
           path: dist/
 
   # ========================================================
@@ -151,60 +197,10 @@ jobs:
           cp -r bin dist/
           cp -r builtin dist/
           cp minetest.conf dist/
-          # Kopiert alle benötigten Laufzeit-DLLs direkt zur EXE, damit sie portabel läuft
           cp /${{ matrix.msystem }}/bin/*.dll dist/bin/ 2>/dev/null || true
 
       - name: Upload Windows ZIP
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.out_name }}
-          path: dist/
-
-  # ========================================================
-  # LINUX 32-BIT BUILD
-  # ========================================================
-  build-linux-32:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Enable Multiarch & Install 32-bit Toolchain
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build git \
-            g++-multilib gcc-multilib \
-            libluajit-5.1-dev:i386 libzstd-dev:i386 libsqlite3-dev:i386 \
-            libopenal-dev:i386 libvorbis-dev:i386 libogg-dev:i386 \
-            libjpeg-dev:i386 libpng-dev:i386 libgl1-mesa-dev:i386 \
-            libx11-dev:i386 libxi-dev:i386 libxxf86vm-dev:i386 \
-            libcurl4-openssl-dev:i386 libfreetype6-dev:i386
-
-      - name: Ensure IrrlichtMt Source Exists
-        run: |
-          if [ ! -d "irr" ] && [ ! -d "lib/irrlichtmt" ]; then
-            git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
-          fi
-
-      - name: Build Linux 32-Bit
-        run: |
-          mkdir build && cd build
-          PKG_CONFIG_PATH="/usr/lib/i386-linux-gnu/pkgconfig" cmake .. -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="-m32 -O3 -march=i686 -ffast-math" \
-            -DCMAKE_C_FLAGS="-m32 -O3 -march=i686 -ffast-math" \
-            -DRUN_IN_PLACE=TRUE
-          ninja
-          cd ..
-          mkdir -p dist
-          cp -r bin dist/
-          cp -r builtin dist/
-
-      - name: Upload Linux 32-Bit ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: Luanti-Ultra-Linux-32bit
           path: dist/
