@@ -1,0 +1,471 @@
+diff --git a/builtin/settingtypes.txt b/builtin/settingtypes.txt
+index 0e96ac0..6294157 100644
+--- a/builtin/settingtypes.txt
++++ b/builtin/settingtypes.txt
+@@ -498,6 +498,14 @@ fps_max_unfocused (FPS when unfocused) int 10 1 4294967295
+ #    View distance in nodes.
+ viewing_range (Viewing range) int 200 20 4000
+ 
++#    Replace distant opaque terrain with a simplified heightfield mesh.
++#    This reduces far-distance vertex and draw work, but does not load or
++#    persist additional map data beyond what the server has sent.
++terrain_lod_enabled (Enable terrain LOD) bool true
++
++#    Distance in nodes at which the simplified terrain mesh is used.
++terrain_lod_start_distance (Terrain LOD start distance) int 96 16 2048
++
+ #    Undersampling is similar to using a lower screen resolution, but it applies
+ #    to the game world only, keeping the GUI intact.
+ #    It should give a significant performance boost at the cost of less detailed image.
+diff --git a/doc/developing/terrain-lod.md b/doc/developing/terrain-lod.md
+new file mode 100644
+index 0000000..cd9824a
+--- /dev/null
++++ b/doc/developing/terrain-lod.md
+@@ -0,0 +1,9 @@
++# Terrain level of detail (LOD)
++
++Luanti's client can build a coarse, opaque terrain surface alongside each regular mapblock mesh. At the configured distance (`terrain_lod_start_distance`, in nodes), the solid render pass selects the coarse mesh instead of that mapblock's full-detail solid mesh. The default switch is enabled; set `terrain_lod_enabled = false` to keep full-detail solid meshes at every distance.
++
++The first implementation is deliberately conservative. It samples globally aligned 4-node horizontal cells, uses a median surface height, and reuses Luanti's tile, lighting, material, fog, and mesh-buffer paths. Only opaque, non-animated `NDT_NORMAL` nodes with unit visual scale enter the LOD. Liquids, transparent geometry, foliage, nodeboxes, and other special drawtypes remain in the ordinary mesh; transparent geometry is still rendered and sorted by the existing path. The LOD is opaque-only and is not used for the shadow-map pass.
++
++This is a native Luanti terrain-LOD foundation, not a drop-in port of Minecraft's Distant Horizons. It does not generate, persist, or request map data outside the blocks already received from the server, so it cannot display an unseen horizon. The simplified surface also intentionally loses caves, overhangs, buildings and fine terrain detail at distance. The regular mesh remains the source for nearby rendering, transparency and mapblock occlusion metadata.
++
++The main tuning control is the switch distance. The LOD grid stride is currently a conservative implementation constant (4 nodes); it should become a quality setting only after seam behavior, cache invalidation and performance have been measured across mapblock sizes and negative world coordinates.
+diff --git a/minetest.conf.example b/minetest.conf.example
+index bb507cd..be390ec 100644
+--- a/minetest.conf.example
++++ b/minetest.conf.example
+@@ -630,6 +630,13 @@
+ #    type: int min: 20 max: 4000
+ # viewing_range = 200
+ 
++#    Replace distant opaque terrain with a simplified heightfield mesh.
++#    This only applies to map data already received from the server.
++# terrain_lod_enabled = true
++
++#    Distance in nodes at which the simplified terrain mesh is used.
++# terrain_lod_start_distance = 96
++
+ #    Undersampling is similar to using a lower screen resolution, but it applies
+ #    to the game world only, keeping the GUI intact.
+ #    It should give a significant performance boost at the cost of less detailed image.
+diff --git a/src/client/clientmap.cpp b/src/client/clientmap.cpp
+index 4f84d7a..8315d0f 100644
+--- a/src/client/clientmap.cpp
++++ b/src/client/clientmap.cpp
+@@ -64,7 +64,7 @@ namespace {
+ 		}
+ 
+ 		void addFromBlock(v3s16 block_pos, MapBlockMesh *block_mesh,
+-			video::IVideoDriver *driver);
++			video::IVideoDriver *driver, bool use_terrain_lod = false);
+ 	};
+ 
+ 	// reference to a mesh buffer used when rendering the map.
+@@ -154,6 +154,8 @@ static const std::string ClientMap_settings[] = {
+ 	"transparency_sorting_distance",
+ 	"occlusion_culler",
+ 	"enable_raytraced_culling",
++	"terrain_lod_enabled",
++	"terrain_lod_start_distance",
+ };
+ 
+ ClientMap::ClientMap(
+@@ -201,6 +203,10 @@ void ClientMap::onSettingChanged(std::string_view name, bool all)
+ 		m_loops_occlusion_culler = g_settings->get("occlusion_culler") == "loops";
+ 	if (all || name == "enable_raytraced_culling")
+ 		m_enable_raytraced_culling = g_settings->getBool("enable_raytraced_culling");
++	if (all || name == "terrain_lod_enabled")
++		m_terrain_lod_enabled = g_settings->getBool("terrain_lod_enabled");
++	if (all || name == "terrain_lod_start_distance")
++		m_terrain_lod_start_distance = g_settings->getU16("terrain_lod_start_distance");
+ }
+ 
+ ClientMap::~ClientMap()
+@@ -848,10 +854,11 @@ void ClientMap::getBlocksWithMeshes(std::vector<v3s16> &out)
+ }
+ 
+ void MeshBufListMaps::addFromBlock(v3s16 block_pos, MapBlockMesh *block_mesh,
+-	video::IVideoDriver *driver)
++	video::IVideoDriver *driver, bool use_terrain_lod)
+ {
+ 	for (int layer = 0; layer < MAX_TILE_LAYERS; layer++) {
+-		scene::IMesh *mesh = block_mesh->getMesh(layer);
++		scene::IMesh *mesh = use_terrain_lod ?
++			block_mesh->getTerrainLodMesh(layer) : block_mesh->getMesh(layer);
+ 		assert(mesh);
+ 
+ 		u32 c = mesh->getMeshBufferCount();
+@@ -1089,11 +1096,14 @@ void ClientMap::renderMap(video::IVideoDriver* driver, s32 pass)
+ 		if (is_frustum_culled(mesh_sphere_center, mesh_sphere_radius))
+ 			continue;
+ 
++		bool use_terrain_lod = false;
+ 		// Mesh animation
+ 		if (pass == scene::ESNRP_SOLID) {
+ 			// 50 nodes is pretty arbitrary but it should work somewhat nicely
+ 			float distance_sq = camera_position.getDistanceFromSQ(mesh_sphere_center);
+ 			bool faraway = distance_sq >= std::pow(BS * 50 + mesh_sphere_radius, 2.0f);
++			float lod_start = BS * m_terrain_lod_start_distance;
++			use_terrain_lod = m_terrain_lod_enabled && distance_sq >= lod_start * lod_start;
+ 
+ 			if (block_mesh->isAnimationForced() || !faraway ||
+ 					mesh_animate_count < (m_control.range_all ? 200 : 50)) {
+@@ -1117,7 +1127,7 @@ void ClientMap::renderMap(video::IVideoDriver* driver, s32 pass)
+ 				draw_order.emplace_back(get_block_wpos(block_pos), &buffer);
+ 		} else {
+ 			// Otherwise, group them
+-			grouped_buffers.addFromBlock(block_pos, block_mesh, driver);
++			grouped_buffers.addFromBlock(block_pos, block_mesh, driver, use_terrain_lod);
+ 		}
+ 	}
+ 
+@@ -1223,6 +1233,7 @@ void ClientMap::invalidateMapBlockMesh(MapBlockMesh *mesh)
+ 	// find all buffers for this block
+ 	MeshBufListMaps tmp;
+ 	tmp.addFromBlock(v3s16(), mesh, getSceneManager()->getVideoDriver());
++	tmp.addFromBlock(v3s16(), mesh, getSceneManager()->getVideoDriver(), true);
+ 
+ 	std::vector<void*> to_delete;
+ 	void *maxp = 0;
+diff --git a/src/client/clientmap.h b/src/client/clientmap.h
+index 76017ed..da5e2ec 100644
+--- a/src/client/clientmap.h
++++ b/src/client/clientmap.h
+@@ -187,6 +187,8 @@ private:
+ 	bool m_cache_anistropic_filter;
+ 	bool m_cache_transparency_sorting_group_by_buffers;
+ 	u16 m_cache_transparency_sorting_distance;
++	bool m_terrain_lod_enabled;
++	u16 m_terrain_lod_start_distance;
+ 
+ 	bool m_loops_occlusion_culler;
+ 	bool m_enable_raytraced_culling;
+diff --git a/src/client/content_mapblock.cpp b/src/client/content_mapblock.cpp
+index 9ea6891..9047b95 100644
+--- a/src/client/content_mapblock.cpp
++++ b/src/client/content_mapblock.cpp
+@@ -2,7 +2,9 @@
+ // SPDX-License-Identifier: LGPL-2.1-or-later
+ // Copyright (C) 2010-2013 celeron55, Perttu Ahola <celeron55@gmail.com>
+ 
++#include <algorithm>
+ #include <cmath>
++#include <vector>
+ #include "content_mapblock.h"
+ #include "util/basic_macros.h"
+ #include "util/numeric.h"
+@@ -2053,3 +2055,139 @@ void MapblockMeshGenerator::generate()
+ 		drawNode();
+ 	}
+ }
++
++void MapblockMeshGenerator::generateTerrainLod(u8 stride)
++{
++	ZoneScoped;
++	assert(stride >= 2 && stride <= MAP_BLOCKSIZE);
++	assert(data->m_side_length % stride == 0);
++
++	struct SurfaceSample {
++		bool valid = false;
++		s16 height = 0;
++		MapNode node;
++		v3s16 pos;
++	};
++
++	const auto is_full_opaque_block = [&] (MapNode node) {
++		if (node.getContent() == CONTENT_AIR || node.getContent() == CONTENT_IGNORE)
++			return false;
++		const ContentFeatures &f = nodedef->get(node);
++		return f.drawtype == NDT_NORMAL && f.alpha == AlphaMode::ALPHAMODE_OPAQUE;
++	};
++
++	const auto is_lod_material = [&] (MapNode node) {
++		const ContentFeatures &f = nodedef->get(node);
++		if (f.drawtype != NDT_NORMAL || f.alpha != AlphaMode::ALPHAMODE_OPAQUE ||
++				f.waving || std::fabs(f.visual_scale - 1.0f) > 1e-3f || !f.visuals)
++			return false;
++
++		for (const TileSpec &tile : f.visuals->tiles) {
++			for (const TileLayer &layer : tile.layers) {
++				if (layer.empty())
++					continue;
++				if ((layer.material_type != TILE_MATERIAL_OPAQUE &&
++						layer.material_type != TILE_MATERIAL_BASIC) ||
++						(layer.material_flags & MATERIAL_FLAG_ANIMATION))
++					return false;
++			}
++		}
++		return true;
++	};
++
++	const s16 cells = data->m_side_length / stride;
++	const s16 grid_size = cells + 2; // one LOD cell of neighbor padding
++	std::vector<SurfaceSample> heights(grid_size * grid_size);
++	const auto height_at = [&] (s16 x, s16 z) -> SurfaceSample & {
++		return heights[(z + 1) * grid_size + (x + 1)];
++	};
++
++	// The median of opaque columns suppresses isolated peaks while preserving
++	// the broad terrain shape.
++	for (s16 cell_z = -1; cell_z <= cells; cell_z++)
++	for (s16 cell_x = -1; cell_x <= cells; cell_x++) {
++		std::vector<SurfaceSample> candidates;
++		candidates.reserve(stride * stride);
++		for (s16 z = cell_z * stride; z < (cell_z + 1) * stride; z++)
++		for (s16 x = cell_x * stride; x < (cell_x + 1) * stride; x++) {
++			for (s16 y = data->m_side_length - 1; y >= 0; y--) {
++				v3s16 pos = blockpos_nodes + v3s16(x, y, z);
++				MapNode node = data->m_vmanip.getNodeNoExNoEmerge(pos);
++				if (!is_full_opaque_block(node))
++					continue;
++
++				MapNode above = data->m_vmanip.getNodeNoExNoEmerge(pos + v3s16(0, 1, 0));
++				if (is_lod_material(node) && !is_full_opaque_block(above))
++					candidates.push_back({true, y, node, v3s16(x, y, z)});
++				break;
++			}
++		}
++
++		if (candidates.empty())
++			continue;
++		std::sort(candidates.begin(), candidates.end(), [] (const SurfaceSample &a,
++				const SurfaceSample &b) { return a.height < b.height; });
++		height_at(cell_x, cell_z) = candidates[candidates.size() / 2];
++	}
++
++	constexpr u8 all_faces = 0b0011'1111;
++	const auto draw_lod_box = [&] (const aabb3f &box, TileSpec *tiles, u8 face) {
++		f32 texture_coords[24];
++		generateCuboidTextureCoords(box, texture_coords);
++		drawAutoLightedCuboid(box, tiles, 6, texture_coords,
++			all_faces ^ (1u << face));
++	};
++
++	for (s16 cell_z = 0; cell_z < cells; cell_z++)
++	for (s16 cell_x = 0; cell_x < cells; cell_x++) {
++		const SurfaceSample &sample = height_at(cell_x, cell_z);
++		if (!sample.valid)
++			continue;
++
++		cur_node.p = sample.pos;
++		cur_node.origin = intToFloat(cur_node.p, BS);
++		cur_node.n = sample.node;
++		cur_node.f = &nodedef->get(cur_node.n);
++		cur_node.lcolor = encode_light(getInteriorLight(cur_node.n, 0, nodedef),
++			cur_node.f->light_source);
++
++		TileSpec tiles[6];
++		for (int face = 0; face < 6; face++)
++			getTile(tile_dirs[face], &tiles[face]);
++
++		const f32 x_min = (cell_x * stride - sample.pos.X - 0.5f) * BS;
++		const f32 x_max = ((cell_x + 1) * stride - sample.pos.X - 0.5f) * BS;
++		const f32 z_min = (cell_z * stride - sample.pos.Z - 0.5f) * BS;
++		const f32 z_max = ((cell_z + 1) * stride - sample.pos.Z - 0.5f) * BS;
++		const f32 top = 0.5f * BS;
++		draw_lod_box(aabb3f(v3f(x_min, -top, z_min), v3f(x_max, top, z_max)),
++			tiles, 0);
++
++		const auto draw_side = [&] (s16 neighbor_x, s16 neighbor_z, u8 face,
++				f32 edge, bool along_x) {
++			const SurfaceSample &neighbor = height_at(neighbor_x, neighbor_z);
++			if (!neighbor.valid || neighbor.height >= sample.height)
++				return;
++			const f32 bottom = (neighbor.height - sample.height + 0.5f) * BS;
++			const f32 epsilon = BS / 1024.0f;
++			if (along_x) {
++				const f32 sx = (edge - sample.pos.X) * BS;
++				const aabb3f side = (face == 3) ?
++					aabb3f(v3f(sx, bottom, z_min), v3f(sx + epsilon, top, z_max)) :
++					aabb3f(v3f(sx - epsilon, bottom, z_min), v3f(sx, top, z_max));
++				draw_lod_box(side, tiles, face);
++			} else {
++				const f32 sz = (edge - sample.pos.Z) * BS;
++				const aabb3f side = (face == 5) ?
++					aabb3f(v3f(x_min, bottom, sz), v3f(x_max, top, sz + epsilon)) :
++					aabb3f(v3f(x_min, bottom, sz - epsilon), v3f(x_max, top, sz));
++				draw_lod_box(side, tiles, face);
++			}
++		};
++
++		draw_side(cell_x - 1, cell_z, 3, cell_x * stride - 0.5f, true);
++		draw_side(cell_x + 1, cell_z, 2, (cell_x + 1) * stride - 0.5f, true);
++		draw_side(cell_x, cell_z - 1, 5, cell_z * stride - 0.5f, false);
++		draw_side(cell_x, cell_z + 1, 4, (cell_z + 1) * stride - 0.5f, false);
++	}
++}
+diff --git a/src/client/content_mapblock.h b/src/client/content_mapblock.h
+index a4d848e..efb54db 100644
+--- a/src/client/content_mapblock.h
++++ b/src/client/content_mapblock.h
+@@ -48,6 +48,7 @@ class MapblockMeshGenerator
+ public:
+ 	MapblockMeshGenerator(MeshMakeData *input, MeshCollector *output);
+ 	void generate();
++	void generateTerrainLod(u8 stride);
+ 
+ private:
+ 	MeshMakeData *const data;
+diff --git a/src/client/mapblock_mesh.cpp b/src/client/mapblock_mesh.cpp
+index 77ae227..cc03196 100644
+--- a/src/client/mapblock_mesh.cpp
++++ b/src/client/mapblock_mesh.cpp
+@@ -462,6 +462,8 @@ MapBlockMesh::MapBlockMesh(Client *client, MeshMakeData *data):
+ 
+ 	for (auto &m : m_mesh)
+ 		m = make_irr<scene::SMesh>();
++	for (auto &m : m_terrain_lod_mesh)
++		m = make_irr<scene::SMesh>();
+ 
+ 	auto mesh_grid = data->m_mesh_grid;
+ 	v3s16 bp = data->m_blockpos;
+@@ -571,6 +573,38 @@ MapBlockMesh::MapBlockMesh(Client *client, MeshMakeData *data):
+ 		}
+ 	}
+ 
++	// Build a compact opaque terrain surface beside the full-detail mesh. The
++	// renderer selects it per block at distance; transparent nodes remain in
++	// the original mesh and keep their normal sorting/animation behavior.
++	MeshCollector lod_collector(m_bounding_sphere_center, offset);
++	MapblockMeshGenerator(data, &lod_collector).generateTerrainLod(4);
++	for (int layer = 0; layer < MAX_TILE_LAYERS; layer++) {
++		scene::SMesh *mesh = static_cast<scene::SMesh *>(m_terrain_lod_mesh[layer].get());
++		applyColorAndMerge(lod_collector.prebuffers[layer]);
++
++		for (PreMeshBuffer &p : lod_collector.prebuffers[layer]) {
++			if (p.empty() || p.layer.isTransparent())
++				continue;
++
++			video::SMaterial material;
++			material.FogEnable = true;
++			material.forEachTexture([] (auto &tex) {
++				tex.MinFilter = video::ETMINF_NEAREST_MIPMAP_NEAREST;
++				tex.MagFilter = video::ETMAGF_NEAREST;
++			});
++			material.MaterialType = m_shdrsrc->getShaderInfo(p.layer.shader_id).material;
++			p.layer.applyMaterialOptions(material, layer);
++
++			auto *buf = new scene::SMeshBuffer();
++			buf->Material = material;
++			buf->append(p.vertices.data(), p.vertices.size(),
++				p.indices.data(), p.indices.size());
++			mesh->addMeshBuffer(buf);
++			buf->drop();
++		}
++		mesh->setHardwareMappingHint(scene::EHM_STATIC);
++	}
++
+ 	m_bsp_tree.buildTree(&m_transparent_triangles, data->m_side_length);
+ 
+ 	// Check if animation is required for this mesh
+@@ -587,6 +621,11 @@ MapBlockMesh::~MapBlockMesh()
+ 			sz += m->getMeshBuffer(i)->getSize();
+ 		m.reset();
+ 	}
++	for (auto &&m : m_terrain_lod_mesh) {
++		for (u32 i = 0; i < m->getMeshBufferCount(); i++)
++			sz += m->getMeshBuffer(i)->getSize();
++		m.reset();
++	}
+ 	for (MinimapMapblock *block : m_minimap_mapblocks)
+ 		delete block;
+ 
+diff --git a/src/client/mapblock_mesh.h b/src/client/mapblock_mesh.h
+index cf63e24..d315385 100644
+--- a/src/client/mapblock_mesh.h
++++ b/src/client/mapblock_mesh.h
+@@ -204,6 +204,13 @@ public:
+ 		return m_mesh[layer].get();
+ 	}
+ 
++	/// @warning ClientMap requires that the vertex and index data is not modified
++	scene::IMesh *getTerrainLodMesh(u8 layer)
++	{
++		assert(layer < MAX_TILE_LAYERS);
++		return m_terrain_lod_mesh[layer].get();
++	}
++
+ 	std::vector<MinimapMapblock*> moveMinimapMapblocks()
+ 	{
+ 		std::vector<MinimapMapblock*> minimap_mapblocks;
+@@ -281,6 +288,7 @@ private:
+ 	typedef std::pair<u8 /* layer index */, u32 /* buffer index */> MeshIndex;
+ 
+ 	irr_ptr<scene::IMesh> m_mesh[MAX_TILE_LAYERS];
++	irr_ptr<scene::IMesh> m_terrain_lod_mesh[MAX_TILE_LAYERS];
+ 	std::vector<MinimapMapblock*> m_minimap_mapblocks;
+ 	ITextureSource *m_tsrc;
+ 	IShaderSource *m_shdrsrc;
+diff --git a/src/defaultsettings.cpp b/src/defaultsettings.cpp
+index d0e0562..23c76ec 100644
+--- a/src/defaultsettings.cpp
++++ b/src/defaultsettings.cpp
+@@ -316,6 +316,8 @@ void set_default_settings()
+ 	settings->setDefault("minimap_double_scan_height", "true");
+ 
+ 	// Effects
++	settings->setDefault("terrain_lod_enabled", "true");
++	settings->setDefault("terrain_lod_start_distance", "96");
+ 	settings->setDefault("enable_post_processing", "true");
+ 	settings->setDefault("post_processing_texture_bits", "10");
+ 	settings->setDefault("directional_colored_fog", "true");
+diff --git a/src/unittest/test_content_mapblock.cpp b/src/unittest/test_content_mapblock.cpp
+index 62e182f..65e9826 100644
+--- a/src/unittest/test_content_mapblock.cpp
++++ b/src/unittest/test_content_mapblock.cpp
+@@ -152,6 +152,7 @@ public:
+ 	void runTests(IGameDef *gamedef) override;
+ 	void testSimpleNode();
+ 	void testSurroundedNode();
++	void testTerrainLod();
+ 	void testInterliquidSame();
+ 	void testInterliquidDifferent();
+ };
+@@ -163,6 +164,7 @@ void TestMapblockMeshGenerator::runTests(IGameDef *gamedef)
+ 	set_light_decode_table();
+ 	TEST(testSimpleNode);
+ 	TEST(testSurroundedNode);
++	TEST(testTerrainLod);
+ 	TEST(testInterliquidSame);
+ 	TEST(testInterliquidDifferent);
+ }
+@@ -219,6 +221,37 @@ void TestMapblockMeshGenerator::testSurroundedNode()
+ 	UASSERT(checkMeshEqual(buf.vertices, buf.indices, {quad::xn, quad::yn, quad::yp, quad::zn, quad::zp}));
+ }
+ 
++void TestMapblockMeshGenerator::testTerrainLod()
++{
++	MockGameDef gamedef;
++	content_t stone = gamedef.addSimpleNode("stone", 42);
++	gamedef.finalize();
++
++	MeshMakeData data{gamedef.ndef(), MAP_BLOCKSIZE, MeshGrid{1}};
++	data.m_generate_minimap = false;
++	data.m_smooth_lighting = false;
++	data.fillBlockDataBegin({0, 0, 0});
++	for (s16 z = 0; z < MAP_BLOCKSIZE; z++)
++	for (s16 x = 0; x < MAP_BLOCKSIZE; x++) {
++		s16 height = x < MAP_BLOCKSIZE / 2 ? 0 : 2;
++		data.m_vmanip.setNode({x, height, z}, {stone, 0, 0});
++	}
++
++	MeshCollector col{{}};
++	MapblockMeshGenerator mg{&data, &col};
++	mg.generateTerrainLod(4);
++
++	u32 vertex_count = 0;
++	u32 index_count = 0;
++	for (const PreMeshBuffer &buffer : col.prebuffers[0]) {
++		vertex_count += buffer.vertices.size();
++		index_count += buffer.indices.size();
++	}
++	UASSERTEQ(u32, vertex_count, 20 * 4);
++	UASSERTEQ(u32, index_count, 20 * 6);
++	UASSERTEQ(std::size_t, col.prebuffers[1].size(), 0);
++}
++
+ void TestMapblockMeshGenerator::testInterliquidSame()
+ {
+ 	MockGameDef gamedef;
