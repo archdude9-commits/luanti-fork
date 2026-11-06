@@ -1,76 +1,11 @@
-name: Build Ultra Luanti (Win64 & Linux64)
+name: Build Patched Ultra Luanti (Win64 & Linux64)
 
 on:
   workflow_dispatch:
 
 jobs:
   # ========================================================
-  # LINUX 64-BIT BUILD (bereits erfolgreich)
-  # ========================================================
-  build-linux-64:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Luanti Code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install All Linux Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build git gettext \
-            libsdl2-dev zlib1g-dev libzip-dev libzstd-dev libluajit-5.1-dev libsqlite3-dev \
-            libopenal-dev libvorbis-dev libogg-dev libjpeg-dev libpng-dev \
-            libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxi-dev \
-            libxxf86vm-dev libcurl4-openssl-dev libfreetype-dev libgmp-dev
-
-      - name: Ensure IrrlichtMt Source Exists
-        run: |
-          if [ ! -d "irr" ] && [ ! -d "lib/irrlichtmt" ]; then
-            git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
-          fi
-
-      - name: Add Distant Horizons & Sodium Config
-        run: |
-          cat << 'EOF' > minetest.conf
-          viewing_range = 5000
-          max_block_send_distance = 64
-          max_block_generate_distance = 64
-          client_mesh_generation_threads = 8
-          mesh_generation_interval = 0
-          enable_shaders = false
-          enable_dynamic_shadows = false
-          leaves_style = opaque
-          smooth_lighting = false
-          occlusion_culler = cull_cells
-          fps_max = 144
-          EOF
-
-      - name: Compile Linux 64-Bit (-O3)
-        run: |
-          mkdir build && cd build
-          cmake .. -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="-O3 -march=x86-64-v2" \
-            -DCMAKE_C_FLAGS="-O3 -march=x86-64-v2" \
-            -DBUILD_UNITTESTS=FALSE \
-            -DBUILD_DOCUMENTATION=FALSE \
-            -DRUN_IN_PLACE=TRUE
-          ninja
-          cd ..
-          mkdir -p dist/bin dist/builtin
-          cp -r bin/* dist/bin/
-          cp -r builtin/* dist/builtin/
-          cp minetest.conf dist/
-
-      - name: Upload Linux 64-Bit ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: Luanti-Ultra-Linux-64bit
-          path: dist/
-
-  # ========================================================
-  # WINDOWS 64-BIT BUILD (Modernes CLANG64 LLVM)
+  # WINDOWS 64-BIT (mit Terrain-LOD-Patch)
   # ========================================================
   build-windows-64:
     runs-on: windows-latest
@@ -78,7 +13,22 @@ jobs:
       - name: Checkout Luanti Code
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0 # Lädt die gesamte Git-Historie, damit Commit b4c7335 gefunden wird
           submodules: recursive
+
+      - name: Checkout Commit b4c7335 & Apply Patch
+        shell: bash
+        run: |
+          echo "Wechsle auf Stand b4c7335..."
+          git checkout b4c7335
+          
+          if [ -f "luanti-terrain-lod.patch" ]; then
+            echo "Wende Terrain-LOD Patch an..."
+            git apply --ignore-whitespace --ignore-space-change luanti-terrain-lod.patch || git apply -3 luanti-terrain-lod.patch
+            echo "Patch erfolgreich angewendet!"
+          else
+            echo "WARNUNG: luanti-terrain-lod.patch wurde nicht im Hauptordner gefunden!"
+          fi
 
       - name: Setup MSYS2 CLANG64 Environment
         uses: msys2/setup-msys2@v2
@@ -112,7 +62,7 @@ jobs:
             git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
           fi
 
-      - name: Add Distant Horizons & Sodium Config
+      - name: Add Distant Horizons Config
         shell: bash
         run: |
           cat << 'EOF' > minetest.conf
@@ -132,13 +82,17 @@ jobs:
       - name: Compile Windows 64-Bit mit Clang (-O3)
         shell: msys2 {0}
         run: |
-          mkdir build && cd build
+          mkdir -p build && cd build
           cmake .. -G Ninja \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_FLAGS="-O3" \
             -DCMAKE_C_FLAGS="-O3" \
+            -DENABLE_POSTGRESQL=FALSE \
+            -DENABLE_REDIS=FALSE \
+            -DENABLE_LEVELDB=FALSE \
+            -DENABLE_SPATIAL=FALSE \
             -DBUILD_UNITTESTS=FALSE \
             -DBUILD_DOCUMENTATION=FALSE \
             -DRUN_IN_PLACE=TRUE
@@ -151,11 +105,84 @@ jobs:
           cp -r bin/* dist/bin/
           cp -r builtin/* dist/builtin/
           cp minetest.conf dist/
-          # Kopiert die Clang-Laufzeit-DLLs portabel in den bin-Ordner
           cp /clang64/bin/*.dll dist/bin/ 2>/dev/null || true
 
       - name: Upload Windows 64-Bit ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Luanti-Ultra-Windows-64bit
+          name: Luanti-LOD-Windows-64bit
+          path: dist/
+
+  # ========================================================
+  # LINUX 64-BIT (mit Terrain-LOD-Patch)
+  # ========================================================
+  build-linux-64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Luanti Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Checkout Commit b4c7335 & Apply Patch
+        run: |
+          git checkout b4c7335
+          if [ -f "luanti-terrain-lod.patch" ]; then
+            git apply --ignore-whitespace --ignore-space-change luanti-terrain-lod.patch || git apply -3 luanti-terrain-lod.patch
+          fi
+
+      - name: Install All Linux Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build git gettext \
+            libsdl2-dev zlib1g-dev libzip-dev libzstd-dev libluajit-5.1-dev libsqlite3-dev \
+            libopenal-dev libvorbis-dev libogg-dev libjpeg-dev libpng-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxi-dev \
+            libxxf86vm-dev libcurl4-openssl-dev libfreetype-dev libgmp-dev
+
+      - name: Ensure IrrlichtMt Source Exists
+        run: |
+          if [ ! -d "irr" ] && [ ! -d "lib/irrlichtmt" ]; then
+            git clone --depth 1 https://github.com/minetest/irrlicht.git lib/irrlichtmt
+          fi
+
+      - name: Add Distant Horizons Config
+        run: |
+          cat << 'EOF' > minetest.conf
+          viewing_range = 5000
+          max_block_send_distance = 64
+          max_block_generate_distance = 64
+          client_mesh_generation_threads = 8
+          mesh_generation_interval = 0
+          enable_shaders = false
+          enable_dynamic_shadows = false
+          leaves_style = opaque
+          smooth_lighting = false
+          occlusion_culler = cull_cells
+          fps_max = 144
+          EOF
+
+      - name: Compile Linux 64-Bit (-O3)
+        run: |
+          mkdir -p build && cd build
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-O3 -march=x86-64-v2" \
+            -DCMAKE_C_FLAGS="-O3 -march=x86-64-v2" \
+            -DENABLE_POSTGRESQL=FALSE \
+            -DBUILD_UNITTESTS=FALSE \
+            -DBUILD_DOCUMENTATION=FALSE \
+            -DRUN_IN_PLACE=TRUE
+          ninja
+          cd ..
+          mkdir -p dist/bin dist/builtin
+          cp -r bin/* dist/bin/
+          cp -r builtin/* dist/builtin/
+          cp minetest.conf dist/
+
+      - name: Upload Linux 64-Bit ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Luanti-LOD-Linux-64bit
           path: dist/
